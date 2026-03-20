@@ -390,6 +390,8 @@ cmd_start() {
     info "Creating tmux session '$session_name'..."
     tmux new-session -d -s "$session_name" -c "$session_dir/repo/$repo_name" \
         "claude --name '$session_name'; exec bash"
+    tmux set-option -t "$session_name" set-titles on
+    tmux set-option -t "$session_name" set-titles-string "clession: #S"
 
     success "Session '$session_name' created"
     info "Attaching..."
@@ -425,6 +427,8 @@ cmd_resume() {
         warn "tmux session gone — recreating..."
         tmux new-session -d -s "$session_name" -c "$repo_dir" \
             "claude --continue --name '$session_name'; exec bash"
+        tmux set-option -t "$session_name" set-titles on
+        tmux set-option -t "$session_name" set-titles-string "clession: #S"
         success "Session recreated"
         info "Attaching..."
         tmux attach-session -t "$session_name"
