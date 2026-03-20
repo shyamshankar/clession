@@ -22,7 +22,7 @@ usage() {
 clession — Claude Session Manager with tmux
 
 Usage:
-  clession start <session-name> --repo <url-or-alias> --base-branch <branch>
+  clession start <session-name> --repo <url-or-alias> [--base-branch <branch>]
   clession resume <session-name>
   clession stop <session-name>
   clession list
@@ -35,7 +35,7 @@ Usage:
   clession --version
 
 Commands:
-  start              Clone a repo at a specific branch and launch Claude in a tmux session
+  start              Clone a repo (optionally at a specific branch) and launch Claude in a tmux session
   resume             Reattach to an existing session (recreates tmux if needed)
   stop               Kill the tmux session and remove the clone
   list               Show all sessions and their status
@@ -196,10 +196,28 @@ resolve_repo() {
     local resolved
     resolved=$(_get_alias "$input" 2>/dev/null || true)
     if [[ -n "$resolved" ]]; then
-        info "Resolved alias '$input' -> $resolved"
+        info "Resolved alias '$input' -> $resolved" >&2
         echo "$resolved"
     else
         echo "$input"
+    fi
+}
+
+_repo_name() {
+    local url="$1"
+    basename "$url" .git
+}
+
+_find_repo_dir() {
+    local session_dir="$1"
+    local repo_parent="$session_dir/repo"
+    if [[ ! -d "$repo_parent" ]]; then return 1; fi
+    local first
+    first=$(find "$repo_parent" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+    if [[ -n "$first" ]]; then
+        echo "$first"
+    else
+        return 1
     fi
 }
 
@@ -311,7 +329,7 @@ cmd_start() {
 
     if [[ -z "$session_name" ]]; then
         error "session name is required"
-        echo "Usage: clession start <session-name> --repo <url-or-path> --base-branch <branch>"
+        echo "Usage: clession start <session-name> --repo <url-or-path> [--base-branch <branch>]"
         exit 1
     fi
 
@@ -337,8 +355,7 @@ cmd_start() {
         exit 1
     fi
     if [[ -z "$base_branch" ]]; then
-        error "--base-branch is required"
-        exit 1
+        info "--base-branch not specified, will use repo default branch"
     fi
 
     repo=$(resolve_repo "$repo")
@@ -351,10 +368,19 @@ cmd_start() {
         exit 1
     fi
 
-    mkdir -p "$session_dir"
+    mkdir -p "$session_dir/repo"
 
-    info "Cloning $repo (branch: $base_branch)..."
-    if ! git clone --branch "$base_branch" "$repo" "$session_dir/repo"; then
+    local repo_name
+    repo_name=$(_repo_name "$repo")
+
+    local clone_args=("$repo" "$session_dir/repo/$repo_name")
+    if [[ -n "$base_branch" ]]; then
+        clone_args=(--branch "$base_branch" "${clone_args[@]}")
+        info "Cloning $repo (branch: $base_branch)..."
+    else
+        info "Cloning $repo (default branch)..."
+    fi
+    if ! git clone "${clone_args[@]}"; then
         error "git clone failed"
         rm -rf "$session_dir"
         exit 1
@@ -362,8 +388,10 @@ cmd_start() {
     success "Clone complete"
 
     info "Creating tmux session '$session_name'..."
-    tmux new-session -d -s "$session_name" -c "$session_dir/repo" \
+    tmux new-session -d -s "$session_name" -c "$session_dir/repo/$repo_name" \
         "claude --name '$session_name'; exec bash"
+    tmux set-option -t "$session_name" set-titles on
+    tmux set-option -t "$session_name" set-titles-string "clession: #S"
 
     success "Session '$session_name' created"
     info "Attaching..."
@@ -386,13 +414,21 @@ cmd_resume() {
         exit 1
     fi
 
+    local repo_dir
+    repo_dir=$(_find_repo_dir "$session_dir") || {
+        error "no cloned repo found in session '$session_name'"
+        exit 1
+    }
+
     if tmux has-session -t "$session_name" 2>/dev/null; then
         info "Attaching to existing tmux session '$session_name'..."
         tmux attach-session -t "$session_name"
     else
         warn "tmux session gone — recreating..."
-        tmux new-session -d -s "$session_name" -c "$session_dir/repo" \
+        tmux new-session -d -s "$session_name" -c "$repo_dir" \
             "claude --continue --name '$session_name'; exec bash"
+        tmux set-option -t "$session_name" set-titles on
+        tmux set-option -t "$session_name" set-titles-string "clession: #S"
         success "Session recreated"
         info "Attaching..."
         tmux attach-session -t "$session_name"
@@ -449,12 +485,13 @@ cmd_list() {
     printf "%-20s %-40s %-15s %-10s\n" "-------" "----" "------" "----"
 
     for name in "${sessions[@]}"; do
-        local repo_dir="$SESSIONS_DIR/$name/repo"
+        local repo_dir
+        repo_dir=$(_find_repo_dir "$SESSIONS_DIR/$name" 2>/dev/null || echo "")
         local origin="n/a"
         local branch="n/a"
         local tmux_status="stopped"
 
-        if [[ -d "$repo_dir/.git" ]]; then
+        if [[ -n "$repo_dir" && -d "$repo_dir/.git" ]]; then
             origin=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || echo "n/a")
             branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null || echo "n/a")
         fi
