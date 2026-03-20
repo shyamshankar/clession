@@ -164,9 +164,9 @@ assert_exit "start with no args fails" 1 "$CLESSION" start
 output=$("$CLESSION" start testsess --base-branch main 2>&1 || true)
 assert_contains "start without --repo errors" "--repo is required" "$output"
 
-# missing --base-branch
+# missing --base-branch is OK (uses default branch)
 output=$("$CLESSION" start testsess --repo foo 2>&1 || true)
-assert_contains "start without --base-branch errors" "--base-branch is required" "$output"
+assert_contains "start without --base-branch uses default" "default branch" "$output"
 
 # ─── List (empty) ════════════════════════════════════════════
 
@@ -234,6 +234,18 @@ assert_contains "alias resolved in start" "Resolved alias" "$output"
 if [[ -d "$TEST_HOME/.clession/sessions/aliasclone/repo/origin" ]]; then
     branch=$(git -C "$TEST_HOME/.clession/sessions/aliasclone/repo/origin" branch --show-current 2>/dev/null || echo "")
     assert_eq "cloned on correct branch via alias" "dev" "$branch"
+fi
+
+# ─── Default branch fallback ════════════════════════════════
+
+echo "=== Default Branch Fallback ==="
+
+output=$("$CLESSION" start defaultclone --repo myrepo 2>&1 || true)
+assert_contains "default branch info shown" "default branch" "$output"
+
+if [[ -d "$TEST_HOME/.clession/sessions/defaultclone/repo/origin" ]]; then
+    branch=$(git -C "$TEST_HOME/.clession/sessions/defaultclone/repo/origin" branch --show-current 2>/dev/null || echo "")
+    assert_eq "cloned on default branch (main)" "main" "$branch"
 fi
 
 # ─── Unknown command ═════════════════════════════════════════

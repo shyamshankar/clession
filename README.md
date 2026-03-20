@@ -54,7 +54,7 @@ clession stop feat-auth
 
 | Command | Description |
 |---|---|
-| `clession start <name> --repo <url-or-alias> --base-branch <branch>` | Clone repo at branch, launch Claude in tmux |
+| `clession start <name> --repo <url-or-alias> [--base-branch <branch>]` | Clone repo (at branch, or default), launch Claude in tmux |
 | `clession resume <name>` | Reattach to session (recreates tmux if needed) |
 | `clession stop <name>` | Kill tmux session, remove clone |
 | `clession list` | Show all sessions with status |
