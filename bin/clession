@@ -1,0 +1,506 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.2.0"
+SESSIONS_DIR="$HOME/.clession/sessions"
+CONFIG_FILE="$HOME/.clession/config"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+info()    { echo -e "${BLUE}[info]${NC} $*"; }
+success() { echo -e "${GREEN}[ok]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[warn]${NC} $*"; }
+error()   { echo -e "${RED}[error]${NC} $*" >&2; }
+
+usage() {
+    cat <<'EOF'
+clession — Claude Session Manager with tmux
+
+Usage:
+  clession start <session-name> --repo <url-or-alias> --base-branch <branch>
+  clession resume <session-name>
+  clession stop <session-name>
+  clession list
+  clession config alias add <name> <url-or-path>
+  clession config alias get <name>
+  clession config alias rm <name>
+  clession config alias list
+  clession doctor
+  clession --help
+  clession --version
+
+Commands:
+  start              Clone a repo at a specific branch and launch Claude in a tmux session
+  resume             Reattach to an existing session (recreates tmux if needed)
+  stop               Kill the tmux session and remove the clone
+  list               Show all sessions and their status
+  config alias add   Save a short alias for a repo URL (rejects duplicates)
+  config alias get   Show the URL for an alias
+  config alias rm    Remove an alias
+  config alias list  Show all aliases
+  doctor             Check that git, tmux, claude, gh are set up correctly
+
+Config:
+  Aliases are stored in ~/.clession/config under the [aliases] section.
+
+Examples:
+  clession config alias add app git@github.com:org/app.git
+  clession start feat-auth --repo app --base-branch dev-ai-native
+  clession resume feat-auth
+  clession stop feat-auth
+  clession list
+EOF
+}
+
+# Config file helpers — INI-style with [aliases] section
+# Format:
+#   [aliases]
+#   app = git@github.com:org/app.git
+#   infra = git@github.com:org/infra.git
+
+_ensure_config() {
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        printf "[aliases]\n" > "$CONFIG_FILE"
+    fi
+}
+
+_get_alias() {
+    local name="$1"
+    if [[ ! -f "$CONFIG_FILE" ]]; then return 1; fi
+    awk -v key="$name" '
+        /^\[aliases\]/ { in_section=1; next }
+        /^\[/          { in_section=0 }
+        in_section && $0 ~ "^"key"[[:space:]]*=" {
+            sub(/^[^=]*=[[:space:]]*/, ""); print; exit
+        }
+    ' "$CONFIG_FILE"
+}
+
+_set_alias() {
+    local name="$1" url="$2"
+    _ensure_config
+    _rm_alias_silent "$name"
+    # Append after [aliases] line
+    awk -v entry="${name} = ${url}" '
+        /^\[aliases\]/ { print; print entry; next }
+        { print }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+}
+
+_rm_alias_silent() {
+    local name="$1"
+    if [[ ! -f "$CONFIG_FILE" ]]; then return; fi
+    awk -v key="$name" '
+        /^\[aliases\]/ { in_section=1 }
+        /^\[/ && !/^\[aliases\]/ { in_section=0 }
+        !(in_section && $0 ~ "^"key"[[:space:]]*=")
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+}
+
+_list_aliases() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then return; fi
+    awk '
+        /^\[aliases\]/ { in_section=1; next }
+        /^\[/          { in_section=0 }
+        in_section && /=/ { print }
+    ' "$CONFIG_FILE"
+}
+
+_find_alias_by_url() {
+    local url="$1"
+    if [[ ! -f "$CONFIG_FILE" ]]; then return; fi
+    awk -v url="$url" '
+        /^\[aliases\]/ { in_section=1; next }
+        /^\[/          { in_section=0 }
+        in_section && /=/ {
+            val = $0; sub(/^[^=]*=[[:space:]]*/, "", val)
+            if (val == url) { key = $0; sub(/[[:space:]]*=.*/, "", key); print key; exit }
+        }
+    ' "$CONFIG_FILE"
+}
+
+preflight() {
+    if [[ "${CLESSION_SKIP_PREFLIGHT:-}" == "1" ]]; then return; fi
+    local issues=0
+
+    # Required binaries
+    for cmd in git tmux claude; do
+        if ! command -v "$cmd" &>/dev/null; then
+            error "'$cmd' is not installed or not in PATH"
+            issues=1
+        fi
+    done
+
+    # git user.name
+    local git_name
+    git_name=$(git config --global user.name 2>/dev/null || true)
+    if [[ -z "$git_name" ]]; then
+        warn "git user.name is not set"
+        echo -n "  Enter your name for git commits: "
+        read -r git_name
+        if [[ -n "$git_name" ]]; then
+            git config --global user.name "$git_name"
+            success "git user.name set to '$git_name'"
+        else
+            error "git user.name is required"
+            issues=1
+        fi
+    fi
+
+    # git user.email
+    local git_email
+    git_email=$(git config --global user.email 2>/dev/null || true)
+    if [[ -z "$git_email" ]]; then
+        warn "git user.email is not set"
+        echo -n "  Enter your email for git commits: "
+        read -r git_email
+        if [[ -n "$git_email" ]]; then
+            git config --global user.email "$git_email"
+            success "git user.email set to '$git_email'"
+        else
+            error "git user.email is required"
+            issues=1
+        fi
+    fi
+
+    # gh CLI (optional but recommended)
+    if command -v gh &>/dev/null; then
+        if ! gh auth status &>/dev/null; then
+            warn "gh CLI is installed but not authenticated"
+            echo "  Run 'gh auth login' to authenticate with GitHub."
+            echo -n "  Continue without gh auth? [y/N] "
+            read -r cont
+            if [[ "$cont" != "y" && "$cont" != "Y" ]]; then
+                exit 1
+            fi
+        fi
+    else
+        warn "gh CLI is not installed — you won't be able to create PRs from sessions"
+        echo "  Install it: https://cli.github.com"
+    fi
+
+    if [[ $issues -ne 0 ]]; then
+        error "preflight checks failed — fix the above issues and retry"
+        exit 1
+    fi
+}
+
+resolve_repo() {
+    local input="$1"
+    local resolved
+    resolved=$(_get_alias "$input" 2>/dev/null || true)
+    if [[ -n "$resolved" ]]; then
+        info "Resolved alias '$input' -> $resolved"
+        echo "$resolved"
+    else
+        echo "$input"
+    fi
+}
+
+cmd_config() {
+    local section="${1:-}"
+    shift || true
+
+    case "$section" in
+        alias) cmd_config_alias "$@" ;;
+        *)
+            error "unknown config section: ${section:-<none>}"
+            echo "Usage: clession config alias [add|get|rm|list]"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_config_alias() {
+    local subcmd="${1:-}"
+    shift || true
+
+    case "$subcmd" in
+        add)
+            local name="${1:-}"
+            local url="${2:-}"
+            if [[ -z "$name" || -z "$url" ]]; then
+                error "usage: clession config alias add <name> <url-or-path>"
+                exit 1
+            fi
+            local existing
+            existing=$(_get_alias "$name" 2>/dev/null || true)
+            if [[ -n "$existing" ]]; then
+                error "alias '$name' already exists -> $existing"
+                echo "Use 'clession config alias rm $name' first to replace it."
+                exit 1
+            fi
+            local dupe
+            dupe=$(_find_alias_by_url "$url" || true)
+            if [[ -n "$dupe" ]]; then
+                error "repo already aliased as '$dupe'"
+                exit 1
+            fi
+            _set_alias "$name" "$url"
+            success "Alias '$name' -> $url"
+            ;;
+        get)
+            local name="${1:-}"
+            if [[ -z "$name" ]]; then
+                error "usage: clession config alias get <name>"
+                exit 1
+            fi
+            local url
+            url=$(_get_alias "$name" 2>/dev/null || true)
+            if [[ -z "$url" ]]; then
+                error "alias '$name' not found"
+                exit 1
+            fi
+            echo "$url"
+            ;;
+        rm|remove)
+            local name="${1:-}"
+            if [[ -z "$name" ]]; then
+                error "usage: clession config alias rm <name>"
+                exit 1
+            fi
+            local existing
+            existing=$(_get_alias "$name" 2>/dev/null || true)
+            if [[ -z "$existing" ]]; then
+                error "alias '$name' not found"
+                exit 1
+            fi
+            _rm_alias_silent "$name"
+            success "Alias '$name' removed"
+            ;;
+        list|"")
+            local entries
+            entries=$(_list_aliases)
+            if [[ -z "$entries" ]]; then
+                info "No aliases configured"
+                info "Add one: clession config alias add <name> <url>"
+                return
+            fi
+            printf "%-15s %s\n" "ALIAS" "REPO"
+            printf "%-15s %s\n" "-----" "----"
+            while IFS='=' read -r name url; do
+                [[ -z "$name" ]] && continue
+                name=$(echo "$name" | xargs)
+                url=$(echo "$url" | xargs)
+                printf "%-15s %s\n" "$name" "$url"
+            done <<< "$entries"
+            ;;
+        *)
+            error "unknown alias subcommand: $subcmd"
+            echo "Usage: clession config alias [add|get|rm|list]"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_start() {
+    preflight
+
+    local session_name=""
+    local repo=""
+    local base_branch=""
+
+    session_name="${1:-}"
+    shift || true
+
+    if [[ -z "$session_name" ]]; then
+        error "session name is required"
+        echo "Usage: clession start <session-name> --repo <url-or-path> --base-branch <branch>"
+        exit 1
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo)
+                repo="${2:-}"
+                shift 2 || { error "--repo requires a value"; exit 1; }
+                ;;
+            --base-branch)
+                base_branch="${2:-}"
+                shift 2 || { error "--base-branch requires a value"; exit 1; }
+                ;;
+            *)
+                error "unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z "$repo" ]]; then
+        error "--repo is required"
+        exit 1
+    fi
+    if [[ -z "$base_branch" ]]; then
+        error "--base-branch is required"
+        exit 1
+    fi
+
+    repo=$(resolve_repo "$repo")
+
+    local session_dir="$SESSIONS_DIR/$session_name"
+
+    if [[ -d "$session_dir" ]]; then
+        error "session '$session_name' already exists"
+        echo "Use 'clession resume $session_name' or 'clession stop $session_name' first."
+        exit 1
+    fi
+
+    mkdir -p "$session_dir"
+
+    info "Cloning $repo (branch: $base_branch)..."
+    if ! git clone --branch "$base_branch" "$repo" "$session_dir/repo"; then
+        error "git clone failed"
+        rm -rf "$session_dir"
+        exit 1
+    fi
+    success "Clone complete"
+
+    info "Creating tmux session '$session_name'..."
+    tmux new-session -d -s "$session_name" -c "$session_dir/repo" \
+        "claude --name '$session_name'; exec bash"
+
+    success "Session '$session_name' created"
+    info "Attaching..."
+    tmux attach-session -t "$session_name"
+}
+
+cmd_resume() {
+    local session_name="${1:-}"
+
+    if [[ -z "$session_name" ]]; then
+        error "session name is required"
+        echo "Usage: clession resume <session-name>"
+        exit 1
+    fi
+
+    local session_dir="$SESSIONS_DIR/$session_name"
+
+    if [[ ! -d "$session_dir" ]]; then
+        error "session '$session_name' does not exist"
+        exit 1
+    fi
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        info "Attaching to existing tmux session '$session_name'..."
+        tmux attach-session -t "$session_name"
+    else
+        warn "tmux session gone — recreating..."
+        tmux new-session -d -s "$session_name" -c "$session_dir/repo" \
+            "claude --continue --name '$session_name'; exec bash"
+        success "Session recreated"
+        info "Attaching..."
+        tmux attach-session -t "$session_name"
+    fi
+}
+
+cmd_stop() {
+    local session_name="${1:-}"
+
+    if [[ -z "$session_name" ]]; then
+        error "session name is required"
+        echo "Usage: clession stop <session-name>"
+        exit 1
+    fi
+
+    local session_dir="$SESSIONS_DIR/$session_name"
+
+    if [[ ! -d "$session_dir" ]]; then
+        error "session '$session_name' does not exist"
+        exit 1
+    fi
+
+    echo -n "Stop session '$session_name' and remove its clone? [y/N] "
+    read -r confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        info "Aborted"
+        exit 0
+    fi
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        info "Killing tmux session..."
+        tmux kill-session -t "$session_name"
+    fi
+
+    info "Removing clone directory..."
+    rm -rf "$session_dir"
+    success "Session '$session_name' stopped and removed"
+}
+
+cmd_list() {
+    mkdir -p "$SESSIONS_DIR"
+
+    local sessions=()
+    while IFS= read -r -d '' dir; do
+        sessions+=("$(basename "$dir")")
+    done < <(find "$SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+    if [[ ${#sessions[@]} -eq 0 ]]; then
+        info "No sessions found"
+        return
+    fi
+
+    printf "%-20s %-40s %-15s %-10s\n" "SESSION" "REPO" "BRANCH" "TMUX"
+    printf "%-20s %-40s %-15s %-10s\n" "-------" "----" "------" "----"
+
+    for name in "${sessions[@]}"; do
+        local repo_dir="$SESSIONS_DIR/$name/repo"
+        local origin="n/a"
+        local branch="n/a"
+        local tmux_status="stopped"
+
+        if [[ -d "$repo_dir/.git" ]]; then
+            origin=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || echo "n/a")
+            branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null || echo "n/a")
+        fi
+
+        if tmux has-session -t "$name" 2>/dev/null; then
+            tmux_status="running"
+        fi
+
+        printf "%-20s %-40s %-15s %-10s\n" "$name" "$origin" "$branch" "$tmux_status"
+    done
+}
+
+# Main
+case "${1:-}" in
+    start)
+        shift
+        cmd_start "$@"
+        ;;
+    resume)
+        shift
+        cmd_resume "$@"
+        ;;
+    stop)
+        shift
+        cmd_stop "$@"
+        ;;
+    list)
+        cmd_list
+        ;;
+    config)
+        shift
+        cmd_config "$@"
+        ;;
+    doctor)
+        preflight
+        success "All checks passed"
+        ;;
+    --version|-v)
+        echo "clession $VERSION"
+        ;;
+    --help|-h|"")
+        usage
+        ;;
+    *)
+        error "unknown command: $1"
+        usage
+        exit 1
+        ;;
+esac
