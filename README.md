@@ -13,8 +13,7 @@ clession gives you full repo clones checked out to any branch, each running Clau
 ### Homebrew
 
 ```bash
-brew tap shyamshankar/clession
-brew install clession
+brew install shyamshankar/clession/clession
 ```
 
 This automatically installs dependencies (`tmux`, `gh`). You still need [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed separately.
