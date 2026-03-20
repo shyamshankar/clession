@@ -186,7 +186,7 @@ assert_exit "stop nonexistent fails" 1 "$CLESSION" stop nope
 
 echo "=== List / Stop (with session dir) ==="
 
-SESSION_DIR="$TEST_HOME/.clession/sessions/fakesess/repo"
+SESSION_DIR="$TEST_HOME/.clession/sessions/fakesess/repo/origin"
 mkdir -p "$SESSION_DIR"
 git clone --branch main "$TEST_REPO/origin.git" "$SESSION_DIR" >/dev/null 2>&1 || {
     # If clone fails because dir exists, init instead
@@ -231,8 +231,8 @@ output=$("$CLESSION" start aliasclone --repo myrepo --base-branch dev 2>&1 || tr
 assert_contains "alias resolved in start" "Resolved alias" "$output"
 
 # Check clone happened with right branch if it got that far
-if [[ -d "$TEST_HOME/.clession/sessions/aliasclone/repo" ]]; then
-    branch=$(git -C "$TEST_HOME/.clession/sessions/aliasclone/repo" branch --show-current 2>/dev/null || echo "")
+if [[ -d "$TEST_HOME/.clession/sessions/aliasclone/repo/origin" ]]; then
+    branch=$(git -C "$TEST_HOME/.clession/sessions/aliasclone/repo/origin" branch --show-current 2>/dev/null || echo "")
     assert_eq "cloned on correct branch via alias" "dev" "$branch"
 fi
 

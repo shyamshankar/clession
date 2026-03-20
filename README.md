@@ -87,7 +87,7 @@ Run `clession doctor` to check everything is set up.
 
 ## How it works
 
-1. **start** — `git clone --branch <base-branch> <repo>` into `~/.clession/sessions/<name>/repo`, creates a tmux session, runs `claude --name <name>`
+1. **start** — `git clone --branch <base-branch> <repo>` into `~/.clession/sessions/<name>/repo/<cloned-repo>/`, creates a tmux session, runs `claude --name <name>`
 2. **resume** — if tmux session exists, attach. If tmux died but clone is still there, recreate with `claude --continue --name <name>`
 3. **stop** — kills tmux, removes the clone directory. Session name is freed for reuse.
 

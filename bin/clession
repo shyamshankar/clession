@@ -196,10 +196,28 @@ resolve_repo() {
     local resolved
     resolved=$(_get_alias "$input" 2>/dev/null || true)
     if [[ -n "$resolved" ]]; then
-        info "Resolved alias '$input' -> $resolved"
+        info "Resolved alias '$input' -> $resolved" >&2
         echo "$resolved"
     else
         echo "$input"
+    fi
+}
+
+_repo_name() {
+    local url="$1"
+    basename "$url" .git
+}
+
+_find_repo_dir() {
+    local session_dir="$1"
+    local repo_parent="$session_dir/repo"
+    if [[ ! -d "$repo_parent" ]]; then return 1; fi
+    local first
+    first=$(find "$repo_parent" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+    if [[ -n "$first" ]]; then
+        echo "$first"
+    else
+        return 1
     fi
 }
 
@@ -351,10 +369,13 @@ cmd_start() {
         exit 1
     fi
 
-    mkdir -p "$session_dir"
+    mkdir -p "$session_dir/repo"
+
+    local repo_name
+    repo_name=$(_repo_name "$repo")
 
     info "Cloning $repo (branch: $base_branch)..."
-    if ! git clone --branch "$base_branch" "$repo" "$session_dir/repo"; then
+    if ! git clone --branch "$base_branch" "$repo" "$session_dir/repo/$repo_name"; then
         error "git clone failed"
         rm -rf "$session_dir"
         exit 1
@@ -362,7 +383,7 @@ cmd_start() {
     success "Clone complete"
 
     info "Creating tmux session '$session_name'..."
-    tmux new-session -d -s "$session_name" -c "$session_dir/repo" \
+    tmux new-session -d -s "$session_name" -c "$session_dir/repo/$repo_name" \
         "claude --name '$session_name'; exec bash"
 
     success "Session '$session_name' created"
@@ -386,12 +407,18 @@ cmd_resume() {
         exit 1
     fi
 
+    local repo_dir
+    repo_dir=$(_find_repo_dir "$session_dir") || {
+        error "no cloned repo found in session '$session_name'"
+        exit 1
+    }
+
     if tmux has-session -t "$session_name" 2>/dev/null; then
         info "Attaching to existing tmux session '$session_name'..."
         tmux attach-session -t "$session_name"
     else
         warn "tmux session gone — recreating..."
-        tmux new-session -d -s "$session_name" -c "$session_dir/repo" \
+        tmux new-session -d -s "$session_name" -c "$repo_dir" \
             "claude --continue --name '$session_name'; exec bash"
         success "Session recreated"
         info "Attaching..."
@@ -449,12 +476,13 @@ cmd_list() {
     printf "%-20s %-40s %-15s %-10s\n" "-------" "----" "------" "----"
 
     for name in "${sessions[@]}"; do
-        local repo_dir="$SESSIONS_DIR/$name/repo"
+        local repo_dir
+        repo_dir=$(_find_repo_dir "$SESSIONS_DIR/$name" 2>/dev/null || echo "")
         local origin="n/a"
         local branch="n/a"
         local tmux_status="stopped"
 
-        if [[ -d "$repo_dir/.git" ]]; then
+        if [[ -n "$repo_dir" && -d "$repo_dir/.git" ]]; then
             origin=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || echo "n/a")
             branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null || echo "n/a")
         fi
