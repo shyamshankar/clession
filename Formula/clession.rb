@@ -2,7 +2,7 @@ class Clession < Formula
   desc "Claude Session Manager with tmux — isolated Claude Code sessions off any branch"
   homepage "https://github.com/shyamshankar/clession"
   url "https://github.com/shyamshankar/clession/archive/refs/tags/v0.2.0.tar.gz"
-  # sha256 will be filled after first release: sha256 "PLACEHOLDER"
+  sha256 "2e356bee2ea1579a99447c2c0778a0679d6847db4b73aefd6552620433237e4d"
   license "MIT"
 
   depends_on "git"
