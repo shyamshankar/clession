@@ -18,6 +18,12 @@ brew install shyamshankar/clession/clession
 
 This automatically installs dependencies (`tmux`, `gh`). You still need [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed separately.
 
+### Update
+
+```bash
+brew upgrade clession
+```
+
 ### Manual
 
 ```bash
